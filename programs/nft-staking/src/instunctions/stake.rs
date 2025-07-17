@@ -1,8 +1,12 @@
-use crate::states::*;
 use anchor_lang::prelude::*;
 use anchor_spl::{
-    associated_token::AssociatedToken,
-    token::{transfer, Mint, Token, TokenAccount, Transfer},
+    metadata::{
+        mpl_token_metadata::instructions::{
+            FreeseDelegateAccountCpiAccounts, FreezeDelegateAccoutCpi,
+        },
+        MasterEditionAccount, Metadata, MetadataAccount,
+    },
+    token::{approve, Approve, Mint, Token, TokenAccount},
 };
 
 #[derive(Accounts)]
@@ -10,92 +14,108 @@ pub struct Stake<'info> {
     /// User who owns the NFT and wants to stake it
     #[account(mut)]
     pub user: Signer<'info>,
+    pub mint: Account<'info, Mint>,
+    pub collection_mint: Account<'info, Mint>,
 
-    /// User's staking account to update points and stake count
     #[account(
         mut,
-        seeds = [b"user", user.key.as_ref()],
-        bump = user_account.bump
+        associated_token::mint = mint,
+        associated_token::authority = user,
     )]
-    pub user_account: Account<'info, UserAccount>,
+    pub mint_ata: Account<'info, TokenAccount>,
 
-    /// Global config containing staking parameters
     #[account(
-        seeds = [b"config"],
-        bump = config.bump
+        seeds = [b"metadata", metadata_program.key().as_ref(), mint.key().as_ref()],
+        seeds::program = metadata_program.key(),
+        bump,
+        constraint = metadata.collection.as_ref().unwrap().key.as_ref() == collection_mint.key().as_ref(),
+        constraint = metadata.collection.as_ref().unwrap().verified == true,
+    )]
+    pub metadata: Account<'info, MetadataAccount>,
+
+    #[account(
+        seeds = [b"metadata", metadata_program.key().as_ref(), mint.key().as_ref(), b"edition"],
+        seeds::program = metadata_program.key(),
+        bump,
+    )]
+    pub edition: Account<'info, MasterEditionAccount>,
+
+    #[account(
+        seed = [b"config".as_ref()],
+        bump = config.bump,
     )]
     pub config: Account<'info, StakeConfig>,
 
-    /// NFT mint to be staked
-    pub nft_mint: Account<'info, Mint>,
-
-    /// User's NFT token account (source of NFT transfer)
     #[account(
-        mut,
-        associated_token::mint = nft_mint,
-        associated_token::authority = user,
-    )]
-    pub user_nft_ata: Account<'info, TokenAccount>,
-
-    /// Vault token account where NFT will be stored (owned by config)
-    #[account(
-        init_if_needed,                              // Create if doesn't exist
-        payer = user,                               // User pays rent
-        seeds = [b"vault", nft_mint.key().as_ref()], // Unique vault per NFT
-        bump,                                       // Store bump
-        token::mint = nft_mint,                     // Must match NFT mint
-        token::authority = config,                  // Config owns the vault
-    )]
-    pub vault_ata: Account<'info, TokenAccount>,
-
-    /// Stake record PDA to track individual NFT stake info
-    #[account(
-        init,                                                         // Create new account
-        payer = user,                                                // User pays rent
-        seeds = [b"stake", user.key.as_ref(), nft_mint.key().as_ref()], // Unique per user+NFT
-        bump,                                                        // Store bump
-        space = 8 + StakeAccount::INIT_SPACE,                       // Account size
+        init,
+        payer = user,
+        space = 8 + StakeAccount::INIT_SPACE
+        seed = [b"stake".as_ref(), mint.key().as_ref(), config.key().as_ref()],
+        bump,
     )]
     pub stake_account: Account<'info, StakeAccount>,
 
-    /// Required programs
-    pub token_program: Program<'info, Token>,
-    pub associated_token_program: Program<'info, AssociatedToken>,
+    #[account(
+        mut,
+        seed = [b"user".as_ref(), user.key().as_ref()],
+        bump,
+    )]
+    pub user_account: Account<'info, UserAccount>,
+
     pub system_program: Program<'info, System>,
-    pub rent: Sysvar<'info, Rent>,
-    pub clock: Sysvar<'info, Clock>,
+    pub token_program: Program<'info, Token>,
+    pub metadata_program: Program<'info, Metadata>,
 }
 
 impl<'info> Stake<'info> {
     /// Execute the staking operation
-    pub fn stake(&mut self, bumps: StakeBumps) -> Result<()> {
-        let clock = Clock::get()?;
+    pub fn stake(&mut self, bumps: &StakeBumps) -> Result<()> {
+        assert!(self.user_account.amount_stake < self.config.max_stake);
 
         // Record stake metadata for this specific NFT
         self.stake_account.set_inner(StakeAccount {
-            owner: self.user.key(),         // Who staked this NFT
-            mint: self.nft_mint.key(),      // Which NFT was staked
-            stake_at: clock.unix_timestamp, // When it was staked
-            bump: bumps.stake_account,      // PDA bump
+            owner: self.user.key(),                 // Who staked this NFT
+            mint: self.mint.key(),                  // Which NFT was staked
+            stake_at: Clock::get()?.unix_timestamp, // When it was staked
+            bump: bumps.stake_account,              // PDA bump
         });
 
-        // Update user's staking statistics
-        self.user_account.set_inner(UserAccount {
-            points: self.config.points_per_stake as u32, // Award points for staking
-            amount_staked: self.user_account.amount_staked + 1, // Increment stake count
-            bump: self.user_account.bump,                // Preserve bump
-        });
+        let cpi_program = self.token_program.to_account_info();
 
         // Transfer NFT from user to vault
-        let cpi_accounts = Transfer {
-            from: self.user_nft_ata.to_account_info(),
-            to: self.vault_ata.to_account_info(),
+        let cpi_accounts = Approve {
+            to: self.mint_ata.to_account_info(),
+            delegate: self.stake_account.to_account_info(),
             authority: self.user.to_account_info(),
         };
 
-        let cpi_ctx = CpiContext::new(self.token_program.to_account_info(), cpi_accounts);
-        transfer(cpi_ctx, 1)?; // Transfer 1 NFT token
+        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
+        approve(cpi_ctx, 1)?; // Transfer 1 NFT token
 
-        Ok(())
+        let seeds = &[
+            b"satke",
+            self.mint.to_account_info().key.as_ref(),
+            self.config.to_account_info().key.as_ref(),
+            &[self.stake_account.bump],
+        ];
+
+        let signer_seeds = &[&seeds[..]];
+
+        let delegte = &self.stake_account.to_account_info();
+        let token_account = &self.mint_ata.to_account_info();
+        let edition = &self.edition.to_account_info();
+        let mint = &self.mint.to_account_info();
+        let token_program = &self.token_program.to_account_info();
+        let metadata_program = &self.metadata_program.to_account_info();
+
+        FreezeDelegateAccoutCpi::new(
+            metadata_program,
+            FreeseDelegateAccountCpiAccounts(delegate, token_account, edition, mint, token_program),
+        )
+        .invoke_signed(signer_seeds)?;
+
+        self.user_account.ammount_staked += 1;
+
+        Ok(());
     }
 }
