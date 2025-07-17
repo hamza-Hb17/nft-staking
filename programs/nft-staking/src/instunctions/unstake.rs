@@ -2,56 +2,80 @@ use anchor_lang::prelude::*;
 use anchor_spl::{
     metadata::{
         mpl_token_metadata::instructions::{
-            FreeseDelegateAccountCpiAccounts, FreezeDelegateAccoutCpi,
-            ThawDelegatedAccountCpiAccounts,
+            ThawDelegatedAccountCpi, 
+            ThawDelegatedAccountCpiAccounts
         },
-        MasterEditionAccount, Metadata, MetadataAccount,
+        MasterEditionAccount,
+        Metadata,
+        MetadataAccount,
     },
-    token::{revoke, Mint, Revoke, Token, TokenAccount},
+    token::{
+        revoke,
+        Revoke,
+        Mint,
+        Token,TokenAccount
+    },
 };
+
+use crate::StakeAcct;
 
 #[derive(Accounts)]
 pub struct Unstake<'info> {
-    /// User who owns the NFT and wants to stake it
+
     #[account(mut)]
     pub user: Signer<'info>,
     pub mint: Account<'info, Mint>,
+    // pub collection_mint: Account<'info, Mint>, //Not needed!
 
     #[account(
         mut,
         associated_token::mint = mint,
-        associated_token::authority = user,
+        associated_token::authority = user
     )]
-    pub mint_ata: Account<'info, TokenAccount>,
+    pub mint_ata: Account<'info, TokenAccount>, // needed to reverse the process
 
-    // to add user_account
-    #[account(
-        seeds = [b"metadata", b"edition", metadata_program.key().as_ref(), mint.key().as_ref(), b"edition"],
-        seeds::program = metadata_program.key(),
-        bump,
-    )]
-    pub edition: Account<'info, MasterEditionAccount>,
-
-    #[account(
-        seed = [b"config".as_ref()],
-        bump = config.bump,
-    )]
-    pub config: Account<'info, StakeConfig>,
-
-    #[account(
-        seed = [b"stake".as_ref(), mint.key().as_ref(), config.key().as_ref()],
-        bump: stake_account.bump,
-    )]
-    pub stake_account: Account<'info, StakeAccount>,
 
     #[account(
         mut,
-        seed = [b"user".as_ref(), user.key().as_ref()],
+        seeds = [b"user".as_ref(), user.key().as_ref()]
+        bump = user_acct.bump,
+    )]
+    pub user_account: Account<'info, StakeAcct>,
+
+    #[account(
+        seeds = [b"edition", b"metadata", metadata_program.key().as_ref(), mint.key().as_ref()], // why do we need both?
+        seeds::program = metadata_program.key(),
         bump,
     )]
-    pub user_account: Account<'info, UserAccount>,
+    pub edition: Account<'info, MasterEditionAccount>, // the masterEdition proves non-fungibility of the asset. That's why we use it. Means no one can mint other supplies of it... What's the alternative???
 
-    pub system_program: Program<'info, System>,
-    pub token_program: Program<'info, Token>,
-    pub metadata_program: Program<'info, Metadata>,
+     #[account(
+        seeds = [b"buhari".as_ref()],
+        bump = config.bump,
+    )]
+    pub config: Account <'info, ConfigState>,
+
+    #[account(
+        // space = StakeAcct::DISCRIMINATOR.to_len() + StakeAcct::INIT_SPACE, // not needed here
+        mut,
+        seeds = [b"stake".as_ref(), mint.key().as_ref(), config.key().as_ref()],
+        bump = stake_acct.bump,
+        
+    )]
+    pub stake_acct: Account<'info, StakeAcct>, //use same convention
+    pub metadata_program: Account<'info, Metadata>,
+    pub system_program: Program<'info, Program>,
+    pub token_program: Program<'info, Token>
+}
+
+impl<'info> Unstake <'info> {
+    pub fn unstake(&mut self) -> Result<()> {
+        let signer_seeds = &[&seeds[..]];
+        let delegate = &self.stake_acct.to_account_info();
+        let token_account = &self.token_account.to_account_info();
+        let mint = &self.mint.to_account_info();
+        let delegate = &self.stake_acct.to_account_info();
+        let delegate = &self.stake_acct.to_account_info();
+
+    }
 }
